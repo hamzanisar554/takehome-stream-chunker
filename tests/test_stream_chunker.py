@@ -10,27 +10,35 @@ cross-checked against an independently computed expected byte stream
 Failure-mode map (FM-x tags refer to the difficulty analysis):
   FM-1  buffered/registered datapath breaks zero-latency passthrough -> Mealy
         comb check on out_valid/out_data every payload beat
-  FM-2  in_ready not deasserted during trailer (or not tracking out_ready)
-        -> in_ready checked every cycle; beat-loss shows in stream oracle
+  FM-2  in_ready not deasserted during the trailer (or not tracking
+        out_ready) -> in_ready checked every cycle; beat-loss shows in the
+        stream oracle
   FM-3  in_last coincident with MAX-th beat: two trailers emitted, or wrong
         is_final -> directed len-4 / len-8 packets
-  FM-4  trailer constant swapped (A5/5A) or checksum scope wrong -> every
-        trailer's out_data check
-  FM-5  out_last asserted on final payload beat instead of trailer -> every
-        out_last check
-  FM-6  fragment counter off-by-one (closes after MAX-1 or MAX+1 beats)
-        -> directed len-3/4/5 packets
-  FM-7  trailer duplicated or dropped when out_ready stalls during the
-        trailer -> directed stall storm + randomized backpressure
-  FM-8  per-fragment state (csum/cnt/fin) cleared on entering the trailer or
-        never, instead of after trailer acceptance -> back-to-back packets
+  FM-4  trailer seed swapped (A5/5A) or applied to the wrong beat -> every
+        trailer beat's out_data check
+  FM-5  out_last on the wrong beat (final payload beat, or the length beat)
+        -> every out_last check
+  FM-6  fragment counter off-by-one (closes after MAX-1 or MAX+1 beats, or
+        length beat off by one) -> directed len-3/4/5 packets + length checks
+  FM-7  trailer beat duplicated, dropped, or skipped when out_ready stalls
+        on either trailer beat -> directed stall storms + randomized
+        backpressure
+  FM-8  per-fragment state (crc/cnt/fin) cleared on entering the trailer,
+        after the length beat, or never -> back-to-back packets; trailer
+        value corruption
   FM-9  reset gating wrong (in_ready/out_valid high during rst) or stale
-        csum after mid-fragment reset -> mid_stream_reset test
-  FM-9b reset during the trailer phase: pending trailer must be abandoned
-        (no trailer emitted, phase back to payload) and out_valid must be
-        rst-gated even while a trailer is presented -> mid_stream_reset
+        crc after mid-fragment reset -> mid_stream_reset test
+  FM-9b reset during the trailer phase (on a stalled length beat, or between
+        the length and check beats): remaining trailer beats must be
+        abandoned and out_valid rst-gated -> mid_stream_reset
   FM-9c rst coincident with a presented input beat: the beat must not be
         accepted or accumulated ("rst overrides everything") -> mid_stream_reset
+  FM-10 CRC-8 convention wrong (reflected/LSB-first processing, init 0xFF,
+        xor-in misplaced, wrong polynomial) -> every check beat's out_data
+        compare against the model CRC
+  FM-11 length beat wrong (payload count off by one, missing, or replaced
+        by the checksum) -> every length beat's out_data compare
 """
 
 import random
@@ -44,51 +52,68 @@ CLK_NS = 10
 MAXP   = 4
 
 
+def crc8(data, crc=0x00):
+    """CRC-8, poly 0x07, init 0x00, MSB-first, no reflection, no final XOR."""
+    for b in data:
+        crc ^= b & 0xFF
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if (crc & 0x80) else (crc << 1) & 0xFF
+    return crc
+
+
 class ChunkModel:
     """Cycle-accurate Mealy mirror of the spec (independent reference)."""
+
+    PH_PAY, PH_LEN, PH_CHK = 0, 1, 2
 
     def __init__(self, maxp=MAXP):
         self.maxp = maxp
         self.reset()
 
     def reset(self):
-        self.phase = 0   # 0 = payload, 1 = trailer
-        self.csum = 0
+        self.phase = self.PH_PAY
+        self.crc = 0
         self.cnt = 0
         self.fin = 0
 
-    def trailer(self):
-        return self.csum ^ (0xA5 if self.fin else 0x5A)
+    def check_byte(self):
+        return self.crc ^ (0xA5 if self.fin else 0x5A)
 
     def comb(self, rst, in_valid, in_data, in_last, out_ready):
         """Expected combinational outputs for this cycle's inputs."""
         if rst:
             return {"in_ready": 0, "out_valid": 0,
                     "out_data": None, "out_last": None}
-        if self.phase == 0:
+        if self.phase == self.PH_PAY:
             return {"in_ready": 1 if out_ready else 0,
                     "out_valid": 1 if in_valid else 0,
                     "out_data": in_data, "out_last": 0}
+        if self.phase == self.PH_LEN:
+            return {"in_ready": 0, "out_valid": 1,
+                    "out_data": self.cnt, "out_last": 0}
         return {"in_ready": 0, "out_valid": 1,
-                "out_data": self.trailer(), "out_last": 1}
+                "out_data": self.check_byte(), "out_last": 1}
 
     def edge(self, rst, in_valid, in_data, in_last, out_ready):
         """State update at the clock edge ending this cycle."""
         if rst:
             self.reset()
             return
-        pay_acc = (self.phase == 0) and in_valid and out_ready
+        pay_acc = (self.phase == self.PH_PAY) and in_valid and out_ready
         close   = pay_acc and (in_last or self.cnt == self.maxp - 1)
-        trl_acc = (self.phase == 1) and out_ready
+        len_acc = (self.phase == self.PH_LEN) and out_ready
+        chk_acc = (self.phase == self.PH_CHK) and out_ready
         if pay_acc:
-            self.csum ^= in_data
+            self.crc = crc8([in_data], self.crc)
             self.cnt += 1
         if close:
-            self.phase = 1
+            self.phase = self.PH_LEN
             self.fin = 1 if in_last else 0
-        elif trl_acc:
-            self.phase = 0
-            self.csum = 0
+        elif len_acc:
+            self.phase = self.PH_CHK
+        elif chk_acc:
+            self.phase = self.PH_PAY
+            self.crc = 0
             self.cnt = 0
             self.fin = 0
 
@@ -102,11 +127,9 @@ def expected_stream(packets, maxp=MAXP):
             chunk = pkt[i:i + maxp]
             i += len(chunk)
             fin = (i == len(pkt))
-            cs = 0
-            for byte in chunk:
-                cs ^= byte
             out += [(byte, 0) for byte in chunk]
-            out.append((cs ^ (0xA5 if fin else 0x5A), 1))
+            out.append((len(chunk), 0))
+            out.append((crc8(chunk) ^ (0xA5 if fin else 0x5A), 1))
     return out
 
 
@@ -203,7 +226,7 @@ async def send_packets(bench, packets, rnd=None, gap_p=0.0, ready_p=1.0,
         return 1 if rnd.random() < ready_p else 0
 
     guard = 0
-    while idx < len(beats) or bench.m.phase == 1:
+    while idx < len(beats) or bench.m.phase != ChunkModel.PH_PAY:
         guard += 1
         assert guard < 20000, "TB guard: stream did not drain"
         if idx < len(beats) and not asserting:
@@ -222,7 +245,7 @@ async def send_packets(bench, packets, rnd=None, gap_p=0.0, ready_p=1.0,
 
 @cocotb.test()
 async def directed_corners(dut):
-    """Directed sequences that isolate each specified corner (FM-1 .. FM-8)."""
+    """Directed sequences that isolate each specified corner (FM-1 .. FM-11)."""
     cocotb.start_soon(clock_gen(dut.clk))
     b = Bench(dut)
     await b.reset()
@@ -235,7 +258,7 @@ async def directed_corners(dut):
 
     # FM-3 / FM-6: in_last exactly on the MAX-th beat -> ONE final trailer.
     await send([[0x11, 0x22, 0x33, 0x44]], note="len4-exact")
-    # Minimum fragment: single-beat packet.
+    # Minimum fragment: single-beat packet (length beat must read 1).
     await send([[0x99]], note="len1")
     # len 5 = full non-final chunk + 1-byte final chunk (FM-6 boundary).
     await send([[1, 2, 3, 4, 5]], note="len5")
@@ -245,19 +268,23 @@ async def directed_corners(dut):
     await send([[5, 6, 7], list(range(9)), list(range(40, 52))], note="mixed")
     # Back-to-back packets, zero gap (FM-8: state must clear between).
     await send([[0xAA, 0xBB], [0xCC]], note="b2b")
-    # FM-7: out_ready stall storm exactly across the trailer of a len-2 packet.
+    # FM-7: out_ready stall storm across the LENGTH beat of a len-2 packet.
     await send([[0xDE, 0xAD]], ready_seq=[1, 1, 0, 0, 0, 1, 1],
-               note="trailer-stall")
+               note="len-beat-stall")
+    # FM-7: stall landing on the CHECK beat (length beat accepted first).
+    await send([[0x5E]], ready_seq=[1, 1, 0, 0, 1],
+               note="chk-beat-stall")
     # FM-2: next packet already waiting while the trailer goes out; in_ready
-    # must stay low for the whole trailer phase.
+    # must stay low for BOTH trailer beats.
     await send([[0x10, 0x20, 0x30, 0x40, 0x50], [0x60]], note="hold")
 
-    # in_valid gaps mid-fragment: checksum/count must persist across idles.
+    # in_valid gaps mid-fragment: crc/count must persist across idles.
     await b.cycle(in_valid=1, in_data=0x0F, in_last=0, out_ready=1, note="gap p0")
     await b.cycle(out_ready=1, note="gap idle1")
     await b.cycle(out_ready=1, note="gap idle2")
     await b.cycle(in_valid=1, in_data=0xF0, in_last=1, out_ready=1, note="gap p1")
-    await b.cycle(out_ready=1, note="gap trailer")
+    await b.cycle(out_ready=1, note="gap len beat")
+    await b.cycle(out_ready=1, note="gap chk beat")
     await b.cycle(out_ready=1, note="gap drain")
     sent.append([0x0F, 0xF0])
 
@@ -268,12 +295,11 @@ async def directed_corners(dut):
 
 @cocotb.test()
 async def mid_stream_reset(dut):
-    """FM-9: reset mid-fragment aborts it with no trailer; csum/cnt/fin must
-    clear (stale-checksum detector), and in_ready/out_valid must be low
-    while rst is asserted. Also covers reset landing in the trailer phase
-    (FM-9b: pending trailer abandoned, out_valid rst-gated even while a
-    trailer is presented) and rst coincident with a presented input beat
-    (FM-9c: rst overrides everything)."""
+    """FM-9: reset mid-fragment aborts it with no trailer; crc/cnt/fin must
+    clear (stale-CRC detector), and in_ready/out_valid must be low while rst
+    is asserted. Also covers reset landing in the trailer phase (FM-9b: on a
+    stalled length beat, and between the length and check beats) and rst
+    coincident with a presented input beat (FM-9c)."""
     cocotb.start_soon(clock_gen(dut.clk))
     b = Bench(dut)
     await b.reset()
@@ -285,18 +311,18 @@ async def mid_stream_reset(dut):
     await b.cycle(rst=1, out_ready=1, note="rst0")
     await b.cycle(rst=1, note="rst1")
     b.collected.clear()
-    # Fresh packet: a stale csum (0x5C^0xA3) would corrupt this trailer.
+    # Fresh packet: a stale CRC (over 0x5C,0xA3) would corrupt this trailer.
     await send_packets(b, [[0x01, 0x02, 0x03]], note="post-rst")
     assert b.collected == expected_stream([[0x01, 0x02, 0x03]]), \
         "output stream after mid-fragment reset diverged (stale state?)"
 
-    # --- FM-9b: reset landing in a STALLED trailer phase, with an input beat
+    # --- FM-9b: reset landing on a STALLED length beat, with an input beat
     # --- presented and out_ready high during rst. out_valid must be 0 while
-    # --- rst is 1 even though a trailer is pending, the abandoned fragment's
-    # --- trailer must never be emitted, and the phase must return to payload.
+    # --- rst is 1 even though a trailer is pending, and no trailer beat of
+    # --- the abandoned fragment may ever be emitted.
     await b.cycle(in_valid=1, in_data=0x77, in_last=1, out_ready=1,
                   note="trl-rst close")
-    await b.cycle(out_ready=0, note="trl-rst stall")   # trailer presented, stalled
+    await b.cycle(out_ready=0, note="trl-rst len stalled")
     await b.cycle(rst=1, in_valid=1, in_data=0x88, in_last=0, out_ready=1,
                   note="trl-rst rst0")
     await b.cycle(rst=1, in_valid=1, in_data=0x88, in_last=0, out_ready=1,
@@ -305,6 +331,17 @@ async def mid_stream_reset(dut):
     await send_packets(b, [[0x88, 0x99]], note="post-trl-rst")
     assert b.collected == expected_stream([[0x88, 0x99]]), \
         "output stream after trailer-phase reset diverged (trailer not abandoned?)"
+
+    # --- FM-9b: reset BETWEEN the length beat and the check beat. The check
+    # --- beat of the abandoned fragment must never appear.
+    await b.cycle(in_valid=1, in_data=0x21, in_last=1, out_ready=1,
+                  note="mid-trl close")
+    await b.cycle(out_ready=1, note="mid-trl len accepted")
+    await b.cycle(rst=1, out_ready=1, note="mid-trl rst")
+    b.collected.clear()
+    await send_packets(b, [[0x44]], note="post-mid-trl-rst")
+    assert b.collected == expected_stream([[0x44]]), \
+        "output stream after between-beats reset diverged (check beat leaked?)"
 
     # --- FM-9c: rst coincident with a presented payload beat (in_valid=1,
     # --- out_ready=1). The beat must not be accepted or accumulated.
