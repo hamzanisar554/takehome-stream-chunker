@@ -1,0 +1,5 @@
+.venv/
+sim_build/
+__pycache__/
+*.vvp
+.pytest_cache/

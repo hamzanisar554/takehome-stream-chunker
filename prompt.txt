@@ -1,0 +1,14 @@
+Implement the module `stream_chunker` in sources/stream_chunker.sv
+according to docs/spec.md.
+
+Requirements:
+- Synthesizable SystemVerilog, compatible with Icarus Verilog (-g2012).
+- No SystemVerilog Assertions (SVA).
+- Keep the module name, parameter name and default, port names, directions,
+  and widths exactly as in the provided skeleton. Grading uses the default
+  MAX_PAYLOAD = 4.
+- You may write and run your own tests, but grading is performed by a
+  hidden testbench that checks cycle-exact behavior against docs/spec.md.
+
+Deliverable: the completed sources/stream_chunker.sv. Do not modify any
+other file.
