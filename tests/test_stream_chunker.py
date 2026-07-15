@@ -26,6 +26,11 @@ Failure-mode map (FM-x tags refer to the difficulty analysis):
         never, instead of after trailer acceptance -> back-to-back packets
   FM-9  reset gating wrong (in_ready/out_valid high during rst) or stale
         csum after mid-fragment reset -> mid_stream_reset test
+  FM-9b reset during the trailer phase: pending trailer must be abandoned
+        (no trailer emitted, phase back to payload) and out_valid must be
+        rst-gated even while a trailer is presented -> mid_stream_reset
+  FM-9c rst coincident with a presented input beat: the beat must not be
+        accepted or accumulated ("rst overrides everything") -> mid_stream_reset
 """
 
 import random
@@ -265,7 +270,10 @@ async def directed_corners(dut):
 async def mid_stream_reset(dut):
     """FM-9: reset mid-fragment aborts it with no trailer; csum/cnt/fin must
     clear (stale-checksum detector), and in_ready/out_valid must be low
-    while rst is asserted."""
+    while rst is asserted. Also covers reset landing in the trailer phase
+    (FM-9b: pending trailer abandoned, out_valid rst-gated even while a
+    trailer is presented) and rst coincident with a presented input beat
+    (FM-9c: rst overrides everything)."""
     cocotb.start_soon(clock_gen(dut.clk))
     b = Bench(dut)
     await b.reset()
@@ -281,6 +289,33 @@ async def mid_stream_reset(dut):
     await send_packets(b, [[0x01, 0x02, 0x03]], note="post-rst")
     assert b.collected == expected_stream([[0x01, 0x02, 0x03]]), \
         "output stream after mid-fragment reset diverged (stale state?)"
+
+    # --- FM-9b: reset landing in a STALLED trailer phase, with an input beat
+    # --- presented and out_ready high during rst. out_valid must be 0 while
+    # --- rst is 1 even though a trailer is pending, the abandoned fragment's
+    # --- trailer must never be emitted, and the phase must return to payload.
+    await b.cycle(in_valid=1, in_data=0x77, in_last=1, out_ready=1,
+                  note="trl-rst close")
+    await b.cycle(out_ready=0, note="trl-rst stall")   # trailer presented, stalled
+    await b.cycle(rst=1, in_valid=1, in_data=0x88, in_last=0, out_ready=1,
+                  note="trl-rst rst0")
+    await b.cycle(rst=1, in_valid=1, in_data=0x88, in_last=0, out_ready=1,
+                  note="trl-rst rst1")
+    b.collected.clear()
+    await send_packets(b, [[0x88, 0x99]], note="post-trl-rst")
+    assert b.collected == expected_stream([[0x88, 0x99]]), \
+        "output stream after trailer-phase reset diverged (trailer not abandoned?)"
+
+    # --- FM-9c: rst coincident with a presented payload beat (in_valid=1,
+    # --- out_ready=1). The beat must not be accepted or accumulated.
+    await b.cycle(in_valid=1, in_data=0x3C, in_last=0, out_ready=1,
+                  note="pay-rst b0")
+    await b.cycle(rst=1, in_valid=1, in_data=0x5A, in_last=0, out_ready=1,
+                  note="pay-rst rst")
+    b.collected.clear()
+    await send_packets(b, [[0x01]], note="post-pay-rst")
+    assert b.collected == expected_stream([[0x01]]), \
+        "output stream after same-cycle rst+in_valid diverged (beat accepted during rst?)"
 
 
 @cocotb.test()
