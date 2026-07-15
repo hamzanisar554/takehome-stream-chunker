@@ -16,7 +16,7 @@ module stream_chunker #(
     input  logic [7:0] in_data,
     input  logic       in_last,
 
-    // output byte stream (valid/ready, out_last marks trailer beats)
+    // output byte stream (valid/ready, out_last marks the final trailer beat)
     output logic       out_valid,
     input  logic       out_ready,
     output logic [7:0] out_data,
