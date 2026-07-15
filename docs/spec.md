@@ -3,10 +3,8 @@
 ## 1. Overview
 
 `stream_chunker` segments a byte stream of packets into fragments of at
-most `MAX_PAYLOAD` payload beats and inserts a two-beat trailer after each
-fragment. Payload beats pass through combinationally (zero latency); each
-trailer occupies exactly two extra output beats. Single clock domain;
-synchronous, active-high reset.
+most `MAX_PAYLOAD` payload beats and inserts a trailer after each fragment.
+Single clock domain; synchronous, active-high reset.
 
 ## 2. Interface
 
@@ -41,12 +39,10 @@ the beat is accepted. `in_last` is meaningful only while `in_valid` is 1.
   the module is in the **payload phase**, and `out_ready` is 1.
 - **Payload phase:** the module forwards the input beat combinationally in
   the same cycle — `out_valid` equals `in_valid` and `out_data` equals
-  `in_data`. `out_last` is 0 on payload beats.
-- **Trailer phase:** `out_valid` is 1 (regardless of `in_valid`) and
-  `out_data` carries the current trailer beat (§5). The two trailer beats
-  are emitted in §5's order; each trailer beat and `out_valid` hold stable
-  until that beat is accepted. `out_last` is 1 on the check beat and 0 on
-  the length beat.
+  `in_data`.
+- **Trailer phase:** `out_valid` is 1 and `out_data` carries the current
+  trailer beat (§5). Each trailer beat and `out_valid` hold stable until
+  that beat is accepted.
 - While `rst` is 1, `in_ready` and `out_valid` shall both be 0.
 
 ## 4. Fragmentation
@@ -69,42 +65,29 @@ accepted, the module returns to the payload phase.
 Each fragment is followed by a two-beat trailer, emitted in this order:
 
 1. **Length beat:** `out_data` carries the number of payload beats of this
-   fragment, as an unsigned 8-bit value (1 … `MAX_PAYLOAD`). `out_last`
-   is 0.
-2. **Check beat:** `out_data` carries `crc XOR (F ? 8'hA5 : 8'h5A)`, and
-   `out_last` is 1.
+   fragment, as an unsigned 8-bit value.
+2. **Check beat:** `out_data` carries `crc XOR (F ? 8'hA5 : 8'h5A)`.
 
 where
 
 - `F` (is-final) is 1 iff the fragment's closing beat carried
   `in_last = 1`, and
 - `crc` is the CRC-8 of all payload bytes of **this fragment**, including
-  the closing byte, defined below.
-
-**CRC-8.** Polynomial `x^8 + x^2 + x + 1` (`8'h07`), initial value
-`8'h00`, most-significant-bit-first, no input or output reflection, no
-final XOR. The CRC register starts at `8'h00` for each fragment and
-consumes the fragment's payload bytes in acceptance order. Each payload
-byte `b` updates the 8-bit register `crc` as follows:
-
-- `crc = crc XOR b`; then
-- eight times: if bit 7 of `crc` is 1, `crc = (crc << 1) XOR 8'h07`,
-  otherwise `crc = crc << 1` (shifts are 8-bit; the shifted-out bit is
-  discarded).
+  the closing byte, consumed in acceptance order: polynomial
+  `x^8 + x^2 + x + 1` (`8'h07`), initial value `8'h00`,
+  most-significant-bit-first, no input or output reflection, no final XOR.
 
 ## 6. Per-fragment state lifecycle
 
 The CRC register and payload-beat counter update on each accepted payload
-beat and are cleared **after the trailer's check beat is accepted** — i.e.,
-on the return to the payload phase.
+beat and are cleared **after the trailer's check beat is accepted**.
 
 ## 7. Reset
 
 `rst` is synchronous, active-high, and overrides everything. On a rising
 edge with `rst = 1`, the module returns to the payload phase and clears the
 CRC register, counter, and is-final state. A fragment in progress is
-abandoned: **no further trailer beats are emitted for it.** Output gating
-during reset is specified in §3.
+abandoned: **no further trailer beats are emitted for it.**
 
 ## 8. Implementation constraints
 
