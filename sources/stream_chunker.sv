@@ -1,6 +1,8 @@
 `timescale 1ns/1ps
 //
-// stream_chunker -- implement per docs/spec.md.
+// stream_chunker -- GOLDEN reference implementation.
+// To be completed: implement per docs/spec.md so that the hidden testbench
+// passes (see Task_Creation_Walkthrough_V2.txt, Section 2).
 // Do not change the module name, parameter, port list, or port directions.
 // Synthesizable SystemVerilog only (Icarus Verilog, -g2012). No SVA.
 //
@@ -22,13 +24,5 @@ module stream_chunker #(
     output logic [7:0] out_data,
     output logic       out_last
 );
-
-    // TODO: implement the chunking / trailer-insertion logic per docs/spec.md.
-    // The tie-offs below only keep the skeleton compiling; replace them with
-    // your implementation.
-    assign in_ready  = 1'b0;
-    assign out_valid = 1'b0;
-    assign out_data  = '0;
-    assign out_last  = 1'b0;
 
 endmodule
