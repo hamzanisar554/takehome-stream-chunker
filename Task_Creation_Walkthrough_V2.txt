@@ -34,7 +34,7 @@ Install the following if you don't already have them:
 
 **Github setup:**
 
-Here you need to fork the problem solving repo and another is the framework repo. Recommended: please open two terminals, one for problem solving and another for setting up the framework.
+You will fork one repository (the problem-solving repo) and clone the framework repo. Recommended: please open two terminals, one for problem solving and another for setting up the framework.
 
 **Problem solving repo (use your Terminal 1):** Forking gives you your own copy of the repo (with all branches included) where you can push your golden RTL and the spec modifications.
 
@@ -50,9 +50,11 @@ post clone make sure you see all three branches
 
 ```bash
     git branch -a
-      stream_chunker_baseline
-      stream_chunker_golden
-      stream_chunker_test
+    * stream_chunker_baseline
+      remotes/origin/HEAD -> origin/stream_chunker_baseline
+      remotes/origin/stream_chunker_baseline
+      remotes/origin/stream_chunker_golden
+      remotes/origin/stream_chunker_test
 ```
 
 **Setup the framework repo (use Terminal 2):**
@@ -72,9 +74,11 @@ Set your API keys. Your HUD API key can be created on [hud.ai](https://hud.ai) �
 This framework uses **HUD v6**. Each problem runs in its own Docker image. The container serves a v6 control channel (`hud serve` on port 8765); the agent connects over SSH to edit files in the workspace. When the agent finishes, hidden tests grade the workspace via patch + pytest.
 
 ```bash
-hud set HUD_API_KEY=<your HUD key>
-hud set ANTHROPIC_API_KEY=<your Anthropic key from liaison>
+uv run hud set HUD_API_KEY=<your HUD key>
+uv run hud set ANTHROPIC_API_KEY=<your Anthropic key from liaison>
 ```
+
+> **Note:** if any `hud` command prints a banner suggesting you upgrade `hud-python`, ignore it — do not upgrade `hud-python`.
 
 ---
 
@@ -156,7 +160,7 @@ First, checkout the test branch (which has the testbench):
 git checkout stream_chunker_test
 ```
 
-Run/execute the test against the **baseline** code using the command below (should fail — the module has no internal logic, so the output stream never drains and the testbench reports mismatches):
+Run/execute the test against the **baseline** code using the command below (should fail — the skeleton ties its outputs low, so the testbench reports in_ready mismatches on the first cycles):
 
 ```bash
 cd tests
