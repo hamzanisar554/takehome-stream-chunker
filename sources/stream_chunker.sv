@@ -1,33 +1,26 @@
 `timescale 1ns/1ps
-//
-// stream_chunker -- GOLDEN reference implementation.
-// To be completed: implement per docs/spec.md so that the hidden testbench
-// passes (see Task_Creation_Walkthrough_V2.txt, Section 2).
-// Do not change the module name, parameter, port list, or port directions.
-// Synthesizable SystemVerilog only (Icarus Verilog, -g2012). No SVA.
-//
+
 module stream_chunker #(
-    parameter int MAX_PAYLOAD = 4   // payload beats per fragment; >= 2
+    parameter int MAX_PAYLOAD = 4
 ) (
     input  logic       clk,
-    input  logic       rst,        // synchronous, active-high
+    input  logic       rst,
 
-    // input byte stream (valid/ready, in_last marks end of packet)
     input  logic       in_valid,
     output logic       in_ready,
     input  logic [7:0] in_data,
     input  logic       in_last,
 
-    // output byte stream (valid/ready, out_last marks the final trailer beat)
     output logic       out_valid,
     input  logic       out_ready,
     output logic [7:0] out_data,
     output logic       out_last
 );
 
-    typedef enum logic {
+    typedef enum logic [1:0] {
         PAYLOAD,
-        TRAILER
+        LENGTH,
+        CHECK
     } state_t;
 
     state_t state;
@@ -35,9 +28,9 @@ module stream_chunker #(
     logic [7:0] crc;
     logic [7:0] payload_count;
     logic       is_final;
-    logic       trailer_check;
 
-    // CRC-8 polynomial: x^8 + x^2 + x + 1
+    // CRC-8, polynomial x^8 + x^2 + x + 1 (0x07).
+    // MSB first, initial value 0, no final XOR.
     function automatic logic [7:0] crc_next(
         input logic [7:0] crc_in,
         input logic [7:0] data
@@ -59,6 +52,8 @@ module stream_chunker #(
         end
     endfunction
 
+    // Output side is combinational. Payload data is passed through
+    // without any internal buffering.
     always_comb begin
         in_ready  = 1'b0;
         out_valid = 1'b0;
@@ -69,26 +64,37 @@ module stream_chunker #(
             case (state)
 
                 PAYLOAD: begin
+                    // A payload byte can only be accepted when the
+                    // downstream is ready in the same cycle.
                     in_ready  = out_ready;
                     out_valid = in_valid;
                     out_data  = in_data;
                 end
 
-                TRAILER: begin
+                LENGTH: begin
+                    in_ready  = 1'b0;
+                    out_valid = 1'b1;
+                    out_data  = payload_count;
+                    out_last  = 1'b0;
+                end
+
+                CHECK: begin
+                    in_ready  = 1'b0;
                     out_valid = 1'b1;
 
-                    if (!trailer_check) begin
-                        out_data = payload_count;
-                        out_last = 1'b0;
-                    end
-                    else begin
-                        if (is_final)
-                            out_data = crc ^ 8'hA5;
-                        else
-                            out_data = crc ^ 8'h5A;
+                    if (is_final)
+                        out_data = crc ^ 8'hA5;
+                    else
+                        out_data = crc ^ 8'h5A;
 
-                        out_last = 1'b1;
-                    end
+                    out_last = 1'b1;
+                end
+
+                default: begin
+                    in_ready  = 1'b0;
+                    out_valid = 1'b0;
+                    out_data  = 8'h00;
+                    out_last  = 1'b0;
                 end
 
             endcase
@@ -101,7 +107,6 @@ module stream_chunker #(
             crc           <= 8'h00;
             payload_count <= 8'h00;
             is_final      <= 1'b0;
-            trailer_check <= 1'b0;
         end
         else begin
             case (state)
@@ -111,27 +116,28 @@ module stream_chunker #(
                         crc <= crc_next(crc, in_data);
                         payload_count <= payload_count + 1'b1;
 
+                        // Close the fragment either at in_last or when
+                        // the maximum payload size is reached.
                         if (in_last ||
                             (payload_count == MAX_PAYLOAD - 1)) begin
-                            is_final      <= in_last;
-                            trailer_check <= 1'b0;
-                            state         <= TRAILER;
+                            is_final <= in_last;
+                            state    <= LENGTH;
                         end
                     end
                 end
 
-                TRAILER: begin
+                LENGTH: begin
                     if (out_valid && out_ready) begin
-                        if (!trailer_check) begin
-                            trailer_check <= 1'b1;
-                        end
-                        else begin
-                            state         <= PAYLOAD;
-                            crc           <= 8'h00;
-                            payload_count <= 8'h00;
-                            is_final      <= 1'b0;
-                            trailer_check <= 1'b0;
-                        end
+                        state <= CHECK;
+                    end
+                end
+
+                CHECK: begin
+                    if (out_valid && out_ready) begin
+                        state         <= PAYLOAD;
+                        crc           <= 8'h00;
+                        payload_count <= 8'h00;
+                        is_final      <= 1'b0;
                     end
                 end
 
@@ -140,7 +146,6 @@ module stream_chunker #(
                     crc           <= 8'h00;
                     payload_count <= 8'h00;
                     is_final      <= 1'b0;
-                    trailer_check <= 1'b0;
                 end
 
             endcase
