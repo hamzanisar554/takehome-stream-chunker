@@ -3,7 +3,7 @@
 ## 1. Overview
 
 `stream_chunker` segments a byte stream of packets into fragments of at
-most `MAX_PAYLOAD` payload beats and inserts a trailer after each fragment.
+most `MAX_PAYLOAD` payload beats and appends a trailer after each fragment.
 Single clock domain; synchronous, active-high reset.
 
 ## 2. Interface
@@ -19,7 +19,7 @@ Single clock domain; synchronous, active-high reset.
 | `out_valid` | out | `logic`         | Output beat available.                        |
 | `out_ready` | in  | `logic`         | Downstream accepts an output beat this cycle. |
 | `out_data`  | out | `logic [7:0]`   | Output byte (payload or trailer).             |
-| `out_last`  | out | `logic`         | This output beat is the final beat of its fragment's trailer. |
+| `out_last`  | out | `logic`         | Final beat of the current fragment's trailer. |
 
 Parameter: `MAX_PAYLOAD` (`int`, ≥ 2) — maximum payload beats per fragment.
 
@@ -44,7 +44,6 @@ the beat is accepted. `in_last` is meaningful only while `in_valid` is 1.
 - **Trailer phase:** `out_valid` is 1 and `out_data` carries the current
   trailer beat (§5). Each trailer beat and `out_valid` hold stable until
   that beat is accepted.
-- While `rst` is 1, `in_ready` and `out_valid` shall both be 0.
 
 ## 4. Fragmentation
 
@@ -63,36 +62,40 @@ accepted, the module returns to the payload phase.
 
 ## 5. Trailer
 
-Each fragment is followed by a two-beat trailer, emitted in this order:
+Each fragment is followed by a trailer of two beats.
 
-1. **Length beat:** `out_data` carries the number of payload beats of this
-   fragment, as an unsigned 8-bit value.
-2. **Check beat:** `out_data` carries `crc XOR (F ? 8'hA5 : 8'h5A)`.
+The **length beat** is presented first. Its `out_data` is the number of
+payload beats belonging to this fragment, encoded as an unsigned 8-bit
+integer. `out_last` is 0.
 
-where
+The **check beat** is presented next. Let `L` be the length-beat value.
+Let `F` be 1 iff the fragment's closing beat carried `in_last = 1`. Let
+`R` be the residue defined below, taken over the fragment's payload
+bytes **followed by** the octet `L`. The check beat's `out_data` is `R`
+combined by bitwise XOR with the trailer seed: `8'hA5` when `F` is 1,
+otherwise `8'h5A`. `out_last` is 1.
 
-- `F` (is-final) is 1 iff the fragment's closing beat carried
-  `in_last = 1`, and
-- `crc` is the CRC-8 of the fragment's payload bytes, defined as follows.
-  Interpret the fragment's payload bytes — in acceptance order, most
-  significant bit first — as the coefficient sequence of a polynomial
-  `M(x)` over GF(2), the first-accepted byte's most significant bit being
-  the highest-order coefficient. `crc` is the byte whose bits, most
-  significant first, are the coefficients of the degree-7…0 terms of the
-  remainder of `x^8 · M(x)` divided by `G(x) = x^8 + x^2 + x + 1` over
-  GF(2). There is no bit reflection and no final XOR.
+**Residue.** Treat the octets that enter the residue — the payload bytes
+in acceptance order, then `L` — as the coefficient sequence of a
+polynomial `M(x)` over GF(2), most significant bit first, the first
+octet's most significant bit being the highest-order coefficient. `R`
+is the byte whose bits, most significant first, are the coefficients of
+the degree-7…0 terms of the remainder of `x^8 · M(x)` divided by
+`G(x) = x^8 + x^2 + x + 1` over GF(2).
 
 ## 6. Per-fragment state lifecycle
 
-The CRC state and payload-beat counter update on each accepted payload
-beat and are cleared **after the trailer's check beat is accepted**.
+The payload-beat counter updates on each accepted payload beat. The
+residue is that of §5 for the current fragment. After the check beat is
+accepted, the residue, the counter, and `F` are cleared.
 
 ## 7. Reset
 
-`rst` is synchronous, active-high, and overrides everything. On a rising
-edge with `rst = 1`, the module returns to the payload phase and clears the
-CRC state, counter, and is-final state. A fragment in progress is
-abandoned: **no further trailer beats are emitted for it.**
+`rst` is synchronous, active-high, and overrides everything: while it
+is asserted, `in_ready` and `out_valid` are 0, and no beat is accepted
+on either interface. On a rising edge with `rst = 1`, the module returns
+to the payload phase and clears the residue, counter, and `F`. A fragment
+in progress is abandoned: no further trailer beats are emitted for it.
 
 ## 8. Implementation constraints
 
