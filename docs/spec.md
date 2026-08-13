@@ -45,8 +45,9 @@ This module promises:
   payload, the byte it offers on `out_*` is the byte currently offered on
   `in_*`, in that same cycle. Therefore it may accept a payload byte only
   if downstream is willing to accept an output byte in that same cycle.
-- `in_ready` is 1 only when a payload accept is actually allowed (see
-  §4). During tag emission it is 0.
+- In payload-forwarding mode, `in_ready` shall be 1 in exactly those
+  cycles where a presented payload byte would be accepted, and 0 in every
+  other cycle. During tag emission it is 0.
 - During tag emission it holds `out_valid` high and keeps `out_data`
   unchanged until that tag byte is accepted.
 
@@ -66,36 +67,39 @@ the tag's last byte is accepted, it returns to forwarding payload.
 
 ## 5. Tag format
 
-The tag is exactly two bytes, in this order.
+The tag is exactly two bytes.
 
-**Count byte (first).** Unsigned 8-bit count of payload bytes that belong
-to the piece just ended. `out_last` is 0.
+The earlier tag byte is an unsigned 8-bit count of payload bytes that
+belong to the piece just ended. `out_last` is 0 on that byte.
 
-**Integrity byte (second).** `out_last` is 1. Its value is specified in
-§6.
+The later tag byte is the integrity value of §6. `out_last` is 1 on that
+byte and only then.
 
-## 6. Integrity byte
+## 6. Integrity value
 
-Let `N` be the count from §5. Let `ended_packet` be true iff the piece
-ended because the accepted byte had `in_last` = 1 (including the case
-where that byte was also the `MAX_PAYLOAD`-th byte).
+The integrity value is an 8-bit frame check of the piece's payload
+octets, taken in the order those octets were accepted, after that check
+has been masked as specified below. Trailer/count octets are not part of
+the checked string.
 
-Compute an 8-bit frame check over the piece's payload bytes **only**, in
-the order they were accepted. Do not include `N` in that check. The
-algorithm is CRC-8 with generator `x^8 + x^2 + x + 1`, initial value 0,
-input processed most-significant bit first, no reflected bits, and no
-constant mixed into the remainder after the last bit. Call the resulting
-byte `C`.
+The frame check is the 8-bit cyclic remainder of that octet string with
+these catalog parameters (Rocksoft model): width 8; polynomial `0x07`
+(the `x^8` term implicit); init `0x00`; `refin` false; `refout` false;
+`xorout` `0x00`. Bits of each octet are consumed most-significant first.
 
-If `ended_packet` is true, the integrity byte is `C` with every bit that
-differs from `8'hA5` flipped (i.e. XOR). If `ended_packet` is false, use
-`8'h5A` in place of `8'hA5`.
+The mask applied to that remainder is selected only by the ending
+payload accept: decimal 165 if that accept had `in_last` = 1 (even if it
+was also the `MAX_PAYLOAD`-th byte of the piece), decimal 90 otherwise.
+Each 1-bit of the mask inverts the corresponding bit of the remainder;
+each 0-bit of the mask leaves that remainder bit unchanged. The integrity
+byte is the remainder after this masking.
 
 ## 7. State that belongs to one piece
 
-The running frame check, the payload count, and `ended_packet` describe
-the piece now in progress. They advance on each payload accept. They are
-wiped after the integrity byte is accepted, before the next piece starts.
+The running frame check, the payload count, and whether the ending accept
+carried `in_last` describe the piece now in progress. They advance on
+each payload accept. They are wiped after the later tag byte is accepted,
+before the next piece starts.
 
 ## 8. Reset
 
