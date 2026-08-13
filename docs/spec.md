@@ -1,103 +1,112 @@
 # `stream_chunker` — Functional Specification
 
-## 1. Overview
+## 1. Purpose
 
-`stream_chunker` segments a byte stream of packets into fragments of at
-most `MAX_PAYLOAD` payload beats and inserts a trailer after each fragment.
-Single clock domain; synchronous, active-high reset.
+This module is a single-clock cut-and-tag adapter. Packets arrive as a
+byte stream. The adapter slices each packet into pieces no longer than
+`MAX_PAYLOAD` bytes, forwards every payload byte with no extra cycle of
+delay, and after each piece emits a two-byte tag that a downstream
+parser can use to recover piece length and an integrity check.
 
-## 2. Interface
+Reset is synchronous and active-high.
 
-| Port        | Dir | Type            | Description                                   |
-|-------------|-----|-----------------|-----------------------------------------------|
-| `clk`       | in  | `logic`         | Clock.                                        |
-| `rst`       | in  | `logic`         | Synchronous, active-high reset.               |
-| `in_valid`  | in  | `logic`         | Input beat available.                         |
-| `in_ready`  | out | `logic`         | Module accepts an input beat this cycle.      |
-| `in_data`   | in  | `logic [7:0]`   | Input payload byte.                           |
-| `in_last`   | in  | `logic`         | This beat is the last byte of its packet.     |
-| `out_valid` | out | `logic`         | Output beat available.                        |
-| `out_ready` | in  | `logic`         | Downstream accepts an output beat this cycle. |
-| `out_data`  | out | `logic [7:0]`   | Output byte (payload or trailer).             |
-| `out_last`  | out | `logic`         | This output beat is the final beat of its fragment's trailer. |
+## 2. Ports
 
-Parameter: `MAX_PAYLOAD` (`int`, ≥ 2) — maximum payload beats per fragment.
+Do not rename, resize, or reverse any port. Do not rename the module or
+the parameter.
 
-## 3. Stream rules
+| Name        | Dir | Width     | Role |
+|-------------|-----|-----------|------|
+| `clk`       | in  | 1         | Rising-edge clock. |
+| `rst`       | in  | 1         | Synchronous reset, active high. |
+| `in_valid`  | in  | 1         | Upstream is offering a byte. |
+| `in_ready`  | out | 1         | This module consumes that byte this cycle. |
+| `in_data`   | in  | 8         | Offered payload byte. |
+| `in_last`   | in  | 1         | Offered byte is the last byte of its packet. Valid only while `in_valid` is 1. |
+| `out_valid` | out | 1         | This module is offering a byte. |
+| `out_ready` | in  | 1         | Downstream consumes that byte this cycle. |
+| `out_data`  | out | 8         | Offered byte (payload or tag). |
+| `out_last`  | out | 1         | Offered byte is the last byte of the current piece's tag. |
 
-Both interfaces use a valid/ready handshake: a beat transfers ("is
-accepted") on a rising clock edge where valid and ready are both 1.
+`MAX_PAYLOAD` is an integer parameter, default 4, minimum 2. Hidden
+grading uses the default.
 
-**Upstream contract (guaranteed by the testbench):** once `in_valid` is
-asserted, `in_valid` stays high and `in_data`/`in_last` hold stable until
-the beat is accepted. `in_last` is meaningful only while `in_valid` is 1.
+## 3. Handshake
 
-**Module obligations:**
+A transfer happens only on a rising edge where that interface's valid and
+ready are both 1. Call that an **accept**.
 
-- The module performs no internal buffering. A payload beat is forwarded
-  combinationally in the same cycle it is presented — during the payload
-  phase, `out_valid` equals `in_valid` and `out_data` equals `in_data` —
-  and consequently a payload beat can be accepted only in a cycle where
-  the downstream can take it in that same cycle.
-- `in_ready` shall be 1 in exactly those cycles where a payload beat would
-  be accepted if one were presented (§4 governs which cycles those are).
-- **Trailer phase:** `out_valid` is 1 and `out_data` carries the current
-  trailer beat (§5). Each trailer beat and `out_valid` hold stable until
-  that beat is accepted.
-- While `rst` is 1, `in_ready` and `out_valid` shall both be 0.
+The testbench promises: after `in_valid` rises, it stays 1 and
+`in_data`/`in_last` do not change until the byte is accepted.
 
-## 4. Fragmentation
+This module promises:
 
-The module comes out of reset in the payload phase. Payload beats are
-accepted only in the payload phase. A fragment **closes** on the
-acceptance of a payload beat for which either — or both — of the following
-hold:
+- It never stores a payload byte to replay later. While it is forwarding
+  payload, the byte it offers on `out_*` is the byte currently offered on
+  `in_*`, in that same cycle. Therefore it may accept a payload byte only
+  if downstream is willing to accept an output byte in that same cycle.
+- `in_ready` is 1 only when a payload accept is actually allowed (see
+  §4). During tag emission it is 0.
+- During tag emission it holds `out_valid` high and keeps `out_data`
+  unchanged until that tag byte is accepted.
 
-- the beat carries `in_last = 1`;
-- the beat is the `MAX_PAYLOAD`-th accepted payload beat of the current
-  fragment.
+## 4. When a piece ends
 
-On the cycle after the closing beat, the module is in the trailer phase and
-presents the first trailer beat. After the trailer's check beat is
-accepted, the module returns to the payload phase.
+After reset the module is forwarding payload. Payload accepts are legal
+only in that mode.
 
-## 5. Trailer
+The current piece **ends** on the payload accept for which either of
+these is true (both at once still ends one piece, not two):
 
-Each fragment is followed by a two-beat trailer, emitted in this order:
+- `in_last` is 1 on that accepted byte, or
+- that accept is the `MAX_PAYLOAD`-th payload accept of the piece.
 
-1. **Length beat:** `out_data` carries the number of payload beats of this
-   fragment, as an unsigned 8-bit value.
-2. **Check beat:** `out_data` carries `crc XOR (F ? 8'hA5 : 8'h5A)`.
+The cycle after that ending accept, the module is emitting the tag. After
+the tag's last byte is accepted, it returns to forwarding payload.
 
-where
+## 5. Tag format
 
-- `F` (is-final) is 1 iff the fragment's closing beat carried
-  `in_last = 1`, and
-- `crc` is the CRC-8 of the fragment's payload bytes, defined as follows.
-  Interpret the fragment's payload bytes — in acceptance order, most
-  significant bit first — as the coefficient sequence of a polynomial
-  `M(x)` over GF(2), the first-accepted byte's most significant bit being
-  the highest-order coefficient. `crc` is the byte whose bits, most
-  significant first, are the coefficients of the degree-7…0 terms of the
-  remainder of `x^8 · M(x)` divided by `G(x) = x^8 + x^2 + x + 1` over
-  GF(2). There is no bit reflection and no final XOR.
+The tag is exactly two bytes, in this order.
 
-## 6. Per-fragment state lifecycle
+**Count byte (first).** Unsigned 8-bit count of payload bytes that belong
+to the piece just ended. `out_last` is 0.
 
-The CRC state and payload-beat counter update on each accepted payload
-beat and are cleared **after the trailer's check beat is accepted**.
+**Integrity byte (second).** `out_last` is 1. Its value is specified in
+§6.
 
-## 7. Reset
+## 6. Integrity byte
 
-`rst` is synchronous, active-high, and overrides everything. On a rising
-edge with `rst = 1`, the module returns to the payload phase and clears the
-CRC state, counter, and is-final state. A fragment in progress is
-abandoned: **no further trailer beats are emitted for it.**
+Let `N` be the count from §5. Let `ended_packet` be true iff the piece
+ended because the accepted byte had `in_last` = 1 (including the case
+where that byte was also the `MAX_PAYLOAD`-th byte).
 
-## 8. Implementation constraints
+Compute an 8-bit frame check over the piece's payload bytes **only**, in
+the order they were accepted. Do not include `N` in that check. The
+algorithm is CRC-8 with generator `x^8 + x^2 + x + 1`, initial value 0,
+input processed most-significant bit first, no reflected bits, and no
+constant mixed into the remainder after the last bit. Call the resulting
+byte `C`.
 
-- Synthesizable SystemVerilog, compatible with Icarus Verilog (`-g2012`).
-- No SystemVerilog Assertions (SVA).
-- Do not change the module name, parameter name/default, port names,
-  directions, or widths.
-- Single clock domain. No latches.
+If `ended_packet` is true, the integrity byte is `C` with every bit that
+differs from `8'hA5` flipped (i.e. XOR). If `ended_packet` is false, use
+`8'h5A` in place of `8'hA5`.
+
+## 7. State that belongs to one piece
+
+The running frame check, the payload count, and `ended_packet` describe
+the piece now in progress. They advance on each payload accept. They are
+wiped after the integrity byte is accepted, before the next piece starts.
+
+## 8. Reset
+
+While `rst` is 1 it wins over §3–§7: both `in_ready` and `out_valid` are
+0, so neither side accepts. On a rising edge with `rst` = 1 the module
+goes back to payload-forwarding and wipes the per-piece state of §7. Any
+unfinished piece, including one already in the middle of its tag, is
+dropped; leftover tag bytes must not appear after reset.
+
+## 9. Coding limits
+
+Synthesizable SystemVerilog for Icarus Verilog (`-g2012`). No SVA. One
+clock, no latches. The skeleton's module name, parameter, and ports stay
+exactly as given.
